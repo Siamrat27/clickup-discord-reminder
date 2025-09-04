@@ -1,0 +1,30 @@
+name: ClickUp Daily Check
+
+on:
+  schedule:
+    # Run at 05:00 Bangkok time (22:00 UTC the day before)
+    - cron: "0 22 * * *"
+  workflow_dispatch: # allow manual run
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run script
+        env:
+          CLICKUP_TOKEN: ${{ secrets.CLICKUP_TOKEN }}
+          CLICKUP_TEAM_ID: ${{ secrets.CLICKUP_TEAM_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DAYS_AHEAD: ${{ secrets.DAYS_AHEAD }}
+        run: python clickup_daily_to_discord.py
