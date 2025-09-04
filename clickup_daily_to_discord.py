@@ -85,10 +85,10 @@ def human_label_and_dt(due_ms: int, now_local: datetime, tz: ZoneInfo):
 def build_discord_message(tasks, now_local: datetime, tz: ZoneInfo, days_ahead: int):
     if not tasks:
         content = (
-            "====================\n"
+            "===================================\n"
             f"📅 Daily Check ({now_local.strftime('%Y-%m-%d')}) (0 works)\n"
             f"- No tasks due in the next {days_ahead} days.\n"
-            "===================="
+            "==================================="
         )
         return {"content": content}
 
