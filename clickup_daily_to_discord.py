@@ -86,7 +86,7 @@ def build_discord_message(tasks, now_local: datetime, tz: ZoneInfo, days_ahead: 
     if not tasks:
         content = (
             "====================\n"
-            f"📅 Daily Check ({now_local.strftime('%Y-%m-%d')})\n"
+            f"📅 Daily Check ({now_local.strftime('%Y-%m-%d')}) (0 works)\n"
             f"- No tasks due in the next {days_ahead} days.\n"
             "===================="
         )
@@ -119,13 +119,16 @@ def build_discord_message(tasks, now_local: datetime, tz: ZoneInfo, days_ahead: 
         )
         lines.append(task_block)
 
+    total_count = len(lines)
+
     text = (
         "====================\n"
-        f"📅 Daily Check ({now_local.strftime('%Y-%m-%d')})\n\n"
+        f"📅 Daily Check ({now_local.strftime('%Y-%m-%d')}) ({total_count} works)\n\n"
         + "\n\n".join(lines)
         + "\n===================="
     )
     return {"content": text}
+
 
 
 
