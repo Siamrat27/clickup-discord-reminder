@@ -122,10 +122,10 @@ def build_discord_message(tasks, now_local: datetime, tz: ZoneInfo, days_ahead: 
     total_count = len(lines)
 
     text = (
-        "====================\n"
+        "===================================\n"
         f"📅 Daily Check ({now_local.strftime('%Y-%m-%d')}) ({total_count} works)\n\n"
         + "\n\n".join(lines)
-        + "\n===================="
+        + "\n==================================="
     )
     return {"content": text}
 
