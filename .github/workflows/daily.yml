@@ -2,9 +2,9 @@ name: ClickUp Daily Check
 
 on:
   schedule:
-    # Run at 05:00 Bangkok time (22:00 UTC the day before)
-    - cron: "0 22 * * *"
-  workflow_dispatch: # allow manual run
+    - cron: "0 22 * * *"   # 05:00 Bangkok
+    - cron: "0 5 * * *"    # 12:00 Bangkok
+  workflow_dispatch:        # allow manual run
 
 jobs:
   run-script:
