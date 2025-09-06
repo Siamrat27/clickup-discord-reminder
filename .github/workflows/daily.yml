@@ -2,29 +2,65 @@ name: ClickUp Daily Check
 
 on:
   schedule:
-    - cron: "0 22 * * *"   # 05:00 Bangkok
-    - cron: "0 5 * * *"    # 12:00 Bangkok
+    # GitHub Actions uses UTC
+    - cron: "0 22 * * *"   # 05:00 Asia/Bangkok (UTC+7)
+    - cron: "0 5 * * *"    # 12:00 Asia/Bangkok (UTC+7)
   workflow_dispatch:        # allow manual run
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests groq
+          fi
+
+      # Label the run so your script can show "Morning" or "Noon" in Discord,
+      # and (optionally) let Groq adjust tone/plan.
+      - name: Set REPORT_LABEL by schedule
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          if [ "${{ github.event.schedule }}" = "0 22 * * *" ]; then
+            echo "REPORT_LABEL=Morning" >> $GITHUB_ENV
+          else
+            echo "REPORT_LABEL=Noon" >> $GITHUB_ENV
+          fi
+
+      # Default label when manually dispatched
+      - name: Set REPORT_LABEL for manual runs
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: echo "REPORT_LABEL=Manual" >> $GITHUB_ENV
 
       - name: Run script
         env:
+          # --- ClickUp ---
           CLICKUP_TOKEN: ${{ secrets.CLICKUP_TOKEN }}
           CLICKUP_TEAM_ID: ${{ secrets.CLICKUP_TEAM_ID }}
+
+          # --- Discord ---
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          DAYS_AHEAD: ${{ secrets.DAYS_AHEAD }}
+
+          # --- Windows (tweak in repo or in Secrets as you like) ---
+          DAYS_AHEAD: ${{ secrets.DAYS_AHEAD || 7 }}
+          EXAM_DAYS_AHEAD: ${{ secrets.EXAM_DAYS_AHEAD || 14 }}
+
+          # --- Groq AI (optional but recommended) ---
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          AI_SUMMARY_LANG: ${{ secrets.AI_SUMMARY_LANG || 'EN' }}
+
+          # Label computed above
+          REPORT_LABEL: ${{ env.REPORT_LABEL }}
         run: python clickup_daily_to_discord.py
