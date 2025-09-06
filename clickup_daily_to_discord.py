@@ -3,6 +3,8 @@
 # Purpose: Fetch ClickUp tasks and post a summary to Discord.
 # - Exams (#exam) -> next EXAM_DAYS_AHEAD days (default 14)
 # - Others       -> next DAYS_AHEAD days (default 7)
+# - Adds Groq AI summary at top if GROQ_API_KEY is set
+# - Splits long messages to avoid Discord 2000-char limit
 
 import os, sys
 from datetime import datetime, timedelta, timezone
@@ -11,6 +13,7 @@ import requests
 
 API_BASE = "https://api.clickup.com/api/v2"
 
+# ---------- .env loader ----------
 def load_dotenv(path: str = ".env"):
     if not os.path.exists(path):
         return
@@ -28,6 +31,7 @@ def env_bool(name: str, default: bool = False) -> bool:
         return default
     return val.strip().lower() in ("1", "true", "yes", "y", "on")
 
+# ---------- ClickUp helpers ----------
 def get_my_user_id(headers):
     resp = requests.get(f"{API_BASE}/user", headers=headers, timeout=30)
     resp.raise_for_status()
@@ -61,7 +65,10 @@ def fetch_due_tasks(headers, team_id, due_start_ms, due_end_ms, assignee_id=None
         for t in batch:
             if not t.get("due_date"):
                 continue
-            due = int(t["due_date"])
+            try:
+                due = int(t["due_date"])
+            except Exception:
+                continue
             if due_start_ms <= due <= due_end_ms:
                 tasks.append(t)
 
@@ -85,6 +92,7 @@ def human_label_and_dt(due_ms: int, now_local: datetime, tz: ZoneInfo):
     return label, due_dt
 
 def _is_exam_task(t) -> bool:
+    # Uses ClickUp "tags" (not custom field) to detect exams
     tags = t.get("tags", [])
     return any((tg.get("name") or "").lower() == "exam" for tg in tags)
 
@@ -99,14 +107,77 @@ def _format_task_block(t, now_local: datetime, tz: ZoneInfo):
     status = t.get("status", {}).get("status", "unknown")
     tag_list = t.get("tags", [])
     tags_str = " ".join(f"#{tag['name']}" for tag in tag_list) if tag_list else "-"
+    icon = "🎓" if _is_exam_task(t) else "📝"
     return (
-        f"📝 {name}\n"
+        f"{icon} {name}\n"
         f"   • Status: {status}\n"
         f"   • Tags: {tags_str}\n"
         f"   • Due: {label} ({due_dt.strftime('%Y-%m-%d')} {weekday})\n"
         f"   • Link: <{url}>"
     )
 
+# ---------- Groq AI summary (optional) ----------
+def _short_snapshot(t, now_local, tz):
+    label, due_dt = human_label_and_dt(t["due_date"], now_local, tz)
+    name = t.get("name", "(no title)")
+    status = t.get("status", {}).get("status", "unknown")
+    is_exam = "yes" if _is_exam_task(t) else "no"
+    return f"- {name} | due: {label} ({due_dt.strftime('%Y-%m-%d')}) | status: {status} | exam: {is_exam}"
+
+def ai_summarize_tasks(tasks, now_local, tz):
+    key = os.getenv("GROQ_API_KEY")
+    if not key or not tasks:
+        return None
+    try:
+        from groq import Groq
+        client = Groq(api_key=key)
+
+        today = now_local.strftime("%Y-%m-%d (%a)")
+
+        # Build compact snapshot
+        items = []
+        for t in tasks[:40]:  # limit size
+            label, due_dt = human_label_and_dt(t["due_date"], now_local, tz)
+            name = t.get("name", "(no title)")
+            status = t.get("status", {}).get("status", "unknown")
+            is_exam = "yes" if _is_exam_task(t) else "no"
+            items.append(f"- {name} | due: {label} ({due_dt.strftime('%Y-%m-%d')}) | status: {status} | exam: {is_exam}")
+        items_text = "\n".join(items)
+
+        # Language
+        lang = (os.getenv("AI_SUMMARY_LANG") or "EN").upper()
+        if lang == "TH":
+            instructions = (
+                "สรุปงานภายใน 7–14 วันเป็น 3–5 bullet "
+                "โดยให้ความสำคัญสูงสุดกับงานที่เป็นการสอบ (exam=yes) "
+                "จัดลำดับตามความเร่งด่วน แล้วตามด้วยงานอื่น "
+                "ปิดท้ายด้วยข้อความให้กำลังใจ 1 บรรทัด"
+            )
+        else:
+            instructions = (
+                "Summarize tasks due in the next 7–14 days in 3–5 bullets. "
+                "Focus heavily on exam tasks (exam=yes) first, then other urgent work. "
+                "Highlight deadlines and risks. End with one short motivational line."
+            )
+
+        # Full prompt
+        big_paragraph = (
+            f"Today: {today}\n"
+            f"Tasks list (title | due | status | exam?):\n{items_text}\n\n"
+            f"Instructions: {instructions}"
+        )
+
+        resp = client.chat.completions.create(
+            model="groq/compound",
+            messages=[{"role": "user", "content": big_paragraph}],
+            temperature=0.4,
+            max_tokens=320,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        return None
+
+# ---------- Message builder ----------
 def build_discord_message(tasks, now_local: datetime, tz: ZoneInfo, days_ahead: int, exam_days_ahead: int):
     if not tasks:
         content = (
@@ -124,20 +195,22 @@ def build_discord_message(tasks, now_local: datetime, tz: ZoneInfo, days_ahead: 
     exams = [t for t in tasks_sorted if _is_exam_task(t)]
     others = [t for t in tasks_sorted if not _is_exam_task(t)]
 
-    # Count after we build filtered sections (done in main; here we just render lists passed in)
-    exam_blocks = []
-    other_blocks = []
-
     # Build blocks
-    for t in exams:
-        exam_blocks.append(_format_task_block(t, now_local, tz))
-    for t in others:
-        other_blocks.append(_format_task_block(t, now_local, tz))
+    exam_blocks  = [_format_task_block(t, now_local, tz) for t in exams]
+    other_blocks = [_format_task_block(t, now_local, tz) for t in others]
+    total_count  = len(exam_blocks) + len(other_blocks)
 
-    total_count = len(exam_blocks) + len(other_blocks)
+    # --- AI Summary (optional) ---
+    ai_summary = ai_summarize_tasks(tasks_sorted, now_local, tz)
 
-    # Compose message with two sections
-    sections = [
+    # Compose
+    sections = []
+    if ai_summary:
+        sections.append("🤖 **AI Summary**")
+        sections.append(ai_summary)
+        sections.append("--------------------------------------")
+
+    sections += [
         f"📚 Upcoming Exams (next {exam_days_ahead} days) — [{len(exam_blocks)} exams]",
         ("\n\n".join(exam_blocks) if exam_blocks else "   • None"),
         "--------------------------------------",
@@ -154,14 +227,26 @@ def build_discord_message(tasks, now_local: datetime, tz: ZoneInfo, days_ahead: 
     )
     return {"content": text}
 
+# ---------- Safe Discord sender ----------
+def send_discord_message(webhook, text: str):
+    # Split to avoid Discord 2000-char content limit
+    MAX_LEN = 1900
+    parts = [text[i:i+MAX_LEN] for i in range(0, len(text), MAX_LEN)]
+    for part in parts:
+        resp = requests.post(webhook, json={"content": part}, timeout=30)
+        if not (200 <= resp.status_code < 300):
+            print(f"Discord webhook failed: {resp.status_code} {resp.text}")
+            sys.exit(4)
+
+# ---------- Main ----------
 def main():
     load_dotenv()
 
     token = os.getenv("CLICKUP_TOKEN")
     team_id = os.getenv("CLICKUP_TEAM_ID")
     webhook = os.getenv("DISCORD_WEBHOOK_URL")
-    days_ahead = int(os.getenv("DAYS_AHEAD", "7"))           # default keep 7
-    exam_days_ahead = int(os.getenv("EXAM_DAYS_AHEAD", "14"))# exams use 14
+    days_ahead = int(os.getenv("DAYS_AHEAD", "7"))            # others window
+    exam_days_ahead = int(os.getenv("EXAM_DAYS_AHEAD", "14")) # exam window
     only_me = env_bool("ONLY_ASSIGNED_TO_ME", False)
     include_closed = env_bool("INCLUDE_CLOSED", False)
 
@@ -187,14 +272,12 @@ def main():
     # Start from midnight today
     start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Compute both windows
+    # Windows
     end_local_other = (start_local + timedelta(days=days_ahead)).replace(hour=23, minute=59, second=59, microsecond=0)
     end_local_exam  = (start_local + timedelta(days=exam_days_ahead)).replace(hour=23, minute=59, second=59, microsecond=0)
+    end_local_fetch = end_local_exam  # fetch the larger window once
 
-    # Fetch once using the maximum window (exam window), then split in Python
-    end_local_fetch = end_local_exam
-
-    start_ms = int(start_local.astimezone(timezone.utc).timestamp() * 1000)
+    start_ms     = int(start_local.astimezone(timezone.utc).timestamp() * 1000)
     end_ms_fetch = int(end_local_fetch.astimezone(timezone.utc).timestamp() * 1000)
     end_ms_other = int(end_local_other.astimezone(timezone.utc).timestamp() * 1000)
     end_ms_exam  = int(end_local_exam.astimezone(timezone.utc).timestamp() * 1000)
@@ -206,6 +289,7 @@ def main():
         except Exception as e:
             print(f"WARNING: Couldn't get your user id, continuing without assignee filter. Details: {e}")
 
+    # Fetch & window-filter per task type
     try:
         all_tasks = fetch_due_tasks(headers, team_id, start_ms, end_ms_fetch, assignee_id, include_closed)
     except requests.HTTPError as e:
@@ -215,35 +299,23 @@ def main():
         print("Unexpected error fetching tasks:", repr(e))
         sys.exit(3)
 
-    # Split by tag and filter by respective window
-    exams = []
-    others = []
+    merged = []
     for t in all_tasks:
-        due = int(t["due_date"])
+        try:
+            due = int(t["due_date"])
+        except Exception:
+            continue
         if _is_exam_task(t):
             if _within(due, end_ms_exam):
-                exams.append(t)
+                merged.append(t)
         else:
             if _within(due, end_ms_other):
-                others.append(t)
+                merged.append(t)
 
-    # Build message using the partitioned lists (but build_discord_message expects combined tasks;
-    # we’ll temporarily combine after sorting so its internal partitioning matches our filter)
-    # Instead, we pass the combined filtered list and let it render sections again
-    filtered_tasks = sorted(exams + others, key=lambda x: int(x["due_date"]))
-
-    payload = build_discord_message(filtered_tasks, now_local, tz, days_ahead, exam_days_ahead)
-
-    try:
-        resp = requests.post(webhook, json=payload, timeout=30)
-        if 200 <= resp.status_code < 300:
-            print(f"Sent {len(filtered_tasks)} task(s) to Discord.")
-        else:
-            print(f"Discord webhook failed: {resp.status_code} {resp.text}")
-            sys.exit(4)
-    except Exception as e:
-        print("Unexpected error sending to Discord:", repr(e))
-        sys.exit(4)
+    # Build & send
+    payload = build_discord_message(merged, now_local, tz, days_ahead, exam_days_ahead)
+    send_discord_message(webhook, payload["content"])
+    print(f"Sent {len(merged)} task(s) to Discord.")
 
 if __name__ == "__main__":
     main()
