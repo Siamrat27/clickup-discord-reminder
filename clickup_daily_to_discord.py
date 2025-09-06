@@ -228,11 +228,63 @@ def build_discord_message(tasks, now_local: datetime, tz: ZoneInfo, days_ahead: 
     return {"content": text}
 
 # ---------- Safe Discord sender ----------
-def send_discord_message(webhook, text: str):
-    # Split to avoid Discord 2000-char content limit
-    MAX_LEN = 1900
-    parts = [text[i:i+MAX_LEN] for i in range(0, len(text), MAX_LEN)]
-    for part in parts:
+def send_discord_message(webhook: str, text: str):
+    MAX = 1900  # keep well under 2000
+
+    def chunks_by_paragraph(s: str):
+        paras = s.split("\n\n")
+        out, cur = [], ""
+        for p in paras:
+            block = (p if cur == "" else cur + "\n\n" + p)
+            if len(block) <= MAX:
+                cur = block
+            else:
+                if cur:
+                    out.append(cur)
+                # if a single paragraph is too long, split by lines
+                if len(p) > MAX:
+                    out.extend(chunks_by_line(p))
+                    cur = ""
+                else:
+                    cur = p
+        if cur:
+            out.append(cur)
+        return out
+
+    def chunks_by_line(s: str):
+        lines = s.split("\n")
+        out, cur = [], ""
+        for ln in lines:
+            candidate = (ln if cur == "" else cur + "\n" + ln)
+            if len(candidate) <= MAX:
+                cur = candidate
+            else:
+                if cur:
+                    out.append(cur)
+                # last resort split, but try hard not to cut inside <...>
+                out.extend(safe_hard_split(ln, MAX))
+                cur = ""
+        if cur:
+            out.append(cur)
+        return out
+
+    def safe_hard_split(line: str, max_len: int):
+        # avoid splitting inside <...> by finding URL spans first
+        spans = [(m.start(), m.end()) for m in re.finditer(r"<https?://[^>\s]+>", line)]
+        cuts = []
+        i = 0
+        while i < len(line):
+            j = min(i + max_len, len(line))
+            # if the cut falls inside a URL span, move j to the end of that span
+            for a, b in spans:
+                if a < j < b:
+                    j = b
+                    break
+            cuts.append(line[i:j])
+            i = j
+        return cuts
+
+    for part in chunks_by_paragraph(text):
         resp = requests.post(webhook, json={"content": part}, timeout=30)
         if not (200 <= resp.status_code < 300):
             print(f"Discord webhook failed: {resp.status_code} {resp.text}")
