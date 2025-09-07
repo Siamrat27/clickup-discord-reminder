@@ -5,6 +5,7 @@ on:
     # GitHub Actions uses UTC
     - cron: "0 22 * * *"   # 05:00 Asia/Bangkok (UTC+7)
     - cron: "0 5 * * *"    # 12:00 Asia/Bangkok (UTC+7)
+    - cron: "0 10 * * *"   # 17:00 Asia/Bangkok (UTC+7)
   workflow_dispatch:        # allow manual run
 
 jobs:
