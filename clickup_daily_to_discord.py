@@ -168,7 +168,7 @@ def ai_summarize_tasks(tasks, now_local, tz):
         )
 
         resp = client.chat.completions.create(
-            model="groq/compound",
+            model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": big_paragraph}],
             temperature=0.4,
             max_tokens=320,
